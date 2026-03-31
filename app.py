@@ -1,15 +1,17 @@
-﻿import io
+﻿import base64
+import io
 import os
 import time
 from datetime import datetime
 
+import requests
 import streamlit as st
 from openai import OpenAI
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.platypus import Paragraph, Preformatted, SimpleDocTemplate, Spacer
 
-st.set_page_config(page_title="Grok Hacker SaaS", page_icon="⚡", layout="wide")
+st.set_page_config(page_title="Custom Grok Hacker", page_icon="⚡", layout="wide")
 
 CHAT_MODEL_OPTIONS = [
     "grok-4",
@@ -21,20 +23,39 @@ IMAGE_MODEL_OPTIONS = [
     "grok-imagine-image",
 ]
 
+VIDEO_MODEL_OPTIONS = [
+    "grok-imagine-video",
+]
+
+IMAGE_SIZE_OPTIONS = [
+    "1024x1024",
+    "1536x1024",
+    "1024x1536",
+]
+
+VIDEO_ASPECT_OPTIONS = [
+    "16:9",
+    "9:16",
+    "1:1",
+]
+
+VIDEO_DURATION_OPTIONS = [
+    5,
+    10,
+    15,
+]
+
 CASUAL_PHRASES = [
     "hi", "hello", "hey", "yo", "sup", "what's up", "whats up",
     "how are you", "how are u", "how r u", "who are you", "who r u",
     "good morning", "good evening", "thanks", "thank you"
 ]
 
-if "prev_ids" not in st.session_state:
-    st.session_state.prev_ids = {"planner": None, "builder": None, "critic": None}
+if "chat_output" not in st.session_state:
+    st.session_state.chat_output = ""
 
-if "outputs" not in st.session_state:
-    st.session_state.outputs = {"planner": "", "builder": "", "critic": ""}
-
-if "history" not in st.session_state:
-    st.session_state.history = []
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
 
 if "run_times" not in st.session_state:
     st.session_state.run_times = []
@@ -42,19 +63,21 @@ if "run_times" not in st.session_state:
 if "generated_images" not in st.session_state:
     st.session_state.generated_images = []
 
+if "edited_images" not in st.session_state:
+    st.session_state.edited_images = []
+
+if "generated_videos" not in st.session_state:
+    st.session_state.generated_videos = []
+
 
 def inject_theme():
     st.markdown(
         """
         <style>
         :root {
-            --bg: #05080a;
-            --panel: #0a0f12;
-            --panel2: #0d1418;
             --text: #d8ffe7;
             --muted: #8ab79b;
             --green: #00ff88;
-            --green2: #00cc6f;
             --border: rgba(0,255,136,.18);
             --glow: 0 0 18px rgba(0,255,136,.18);
         }
@@ -71,9 +94,6 @@ def inject_theme():
         }
         h1, h2, h3, .stMarkdown, label, p, div {
             color: var(--text);
-        }
-        .block-container {
-            padding-top: 1.5rem;
         }
         .stTextInput > div > div > input,
         .stTextArea textarea,
@@ -94,29 +114,6 @@ def inject_theme():
             box-shadow: 0 0 20px rgba(0,255,136,.12);
             font-weight: 700 !important;
         }
-        .stButton > button:hover,
-        .stDownloadButton > button:hover {
-            border-color: var(--green) !important;
-            box-shadow: 0 0 28px rgba(0,255,136,.22);
-        }
-        .hack-card {
-            background: linear-gradient(180deg, rgba(8,12,14,.96), rgba(9,15,18,.96));
-            border: 1px solid var(--border);
-            border-radius: 18px;
-            padding: 16px 18px;
-            box-shadow: var(--glow);
-            min-height: 220px;
-        }
-        .hack-title {
-            color: var(--green);
-            font-weight: 800;
-            letter-spacing: .04em;
-            margin-bottom: 10px;
-            text-transform: uppercase;
-        }
-        .muted {
-            color: var(--muted);
-        }
         .hero {
             padding: 18px 22px;
             border: 1px solid var(--border);
@@ -136,6 +133,23 @@ def inject_theme():
             color: var(--muted);
             font-size: 1rem;
         }
+        .hack-card {
+            background: linear-gradient(180deg, rgba(8,12,14,.96), rgba(9,15,18,.96));
+            border: 1px solid var(--border);
+            border-radius: 18px;
+            padding: 16px 18px;
+            box-shadow: var(--glow);
+        }
+        .hack-title {
+            color: var(--green);
+            font-weight: 800;
+            letter-spacing: .04em;
+            margin-bottom: 10px;
+            text-transform: uppercase;
+        }
+        .muted {
+            color: var(--muted);
+        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -151,20 +165,19 @@ def get_secret(name: str, default=None):
     return os.getenv(name, default)
 
 
+def get_api_key():
+    return get_secret("XAI_API_KEY")
+
+
 def get_client() -> OpenAI | None:
-    api_key = get_secret("XAI_API_KEY")
+    api_key = get_api_key()
     if not api_key:
         return None
     return OpenAI(
         api_key=api_key,
         base_url="https://api.x.ai/v1",
-        timeout=60,
+        timeout=120,
     )
-
-
-def is_casual(text: str, context: str = "") -> bool:
-    combined = f"{text} {context}".strip().lower()
-    return any(p in combined for p in CASUAL_PHRASES) and len(combined) <= 160
 
 
 def enforce_rate_limit():
@@ -176,6 +189,15 @@ def enforce_rate_limit():
         st.error("Rate limit hit. Wait a minute and try again.")
         st.stop()
     st.session_state.run_times.append(now)
+
+
+def file_to_data_uri(uploaded_file):
+    if uploaded_file is None:
+        return None
+    mime = uploaded_file.type or "application/octet-stream"
+    raw = uploaded_file.read()
+    b64 = base64.b64encode(raw).decode("utf-8")
+    return f"data:{mime};base64,{b64}"
 
 
 def extract_text(response) -> str:
@@ -198,56 +220,35 @@ def extract_text(response) -> str:
     return "\n\n".join([p for p in parts if p]).strip()
 
 
-def call_agent(client, model, system_prompt, user_prompt, use_web_search=False, previous_response_id=None):
-    payload = {"model": model, "store": True}
-
-    if use_web_search:
-        payload["tools"] = [{"type": "web_search"}]
-
-    if previous_response_id:
-        payload["previous_response_id"] = previous_response_id
-        payload["input"] = [{"role": "user", "content": user_prompt}]
-    else:
-        payload["input"] = [
+def call_chat(client, model, system_prompt, user_prompt):
+    resp = client.responses.create(
+        model=model,
+        store=True,
+        input=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
-        ]
-
-    return client.responses.create(**payload)
-
-
-def generate_image(client, model: str, prompt: str, size: str, n: int = 1):
-    return client.images.generate(
-        model=model,
-        prompt=prompt,
-        size=size,
-        n=n,
+        ],
     )
+    return extract_text(resp)
 
 
-def build_pdf(title: str, planner: str, builder: str, critic: str) -> bytes:
+def build_pdf(title: str, content: str) -> bytes:
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=32, rightMargin=32, topMargin=32, bottomMargin=32)
     styles = getSampleStyleSheet()
-    story = []
-
-    story.append(Paragraph(title, styles["Title"]))
-    story.append(Spacer(1, 12))
-    story.append(Paragraph(datetime.now().strftime("%Y-%m-%d %H:%M:%S"), styles["BodyText"]))
-    story.append(Spacer(1, 16))
-
-    for name, content in [("Planner", planner), ("Builder", builder), ("Critic", critic)]:
-        story.append(Paragraph(name, styles["Heading2"]))
-        story.append(Spacer(1, 6))
-        story.append(Preformatted(content or "(empty)", styles["Code"]))
-        story.append(Spacer(1, 14))
-
+    story = [
+        Paragraph(title, styles["Title"]),
+        Spacer(1, 12),
+        Paragraph(datetime.now().strftime("%Y-%m-%d %H:%M:%S"), styles["BodyText"]),
+        Spacer(1, 16),
+        Preformatted(content or "(empty)", styles["Code"]),
+    ]
     doc.build(story)
     buf.seek(0)
     return buf.read()
 
 
-def render_hack_card(title: str, content: str):
+def render_card(title: str, content: str):
     safe_content = content if content else '<span class="muted">No output yet.</span>'
     html = f"""
     <div class="hack-card">
@@ -258,22 +259,53 @@ def render_hack_card(title: str, content: str):
     st.markdown(html, unsafe_allow_html=True)
 
 
-PLANNER_SYSTEM = """You are Planner.
-Detect intent first.
-- Casual/social input: do not create a project plan. Return one short intent note only.
-- Real task/request: return a concise plan with goal, architecture, steps, and risks.
-Stay practical.
-"""
+def create_image(client, model: str, prompt: str, size: str, n: int):
+    return client.images.generate(
+        model=model,
+        prompt=prompt,
+        size=size,
+        n=n,
+    )
 
-BUILDER_SYSTEM = """You are Builder.
-- Casual/social input: reply naturally and briefly.
-- Real task/request: produce the strongest practical result.
-No over-engineering.
-"""
 
-CRITIC_SYSTEM = """You are Critic.
-- Casual/social input: briefly confirm whether the reply is natural and appropriate.
-- Real task/request: identify gaps/risks and tighten the final version.
+def edit_image_raw(prompt: str, image_data_uri: str, model: str):
+    api_key = get_api_key()
+    url = "https://api.x.ai/v1/images/edits"
+    headers = {"Authorization": f"Bearer {api_key}"}
+    files = {
+        "prompt": (None, prompt),
+        "model": (None, model),
+        "image": (None, image_data_uri),
+    }
+    r = requests.post(url, headers=headers, files=files, timeout=180)
+    r.raise_for_status()
+    return r.json()
+
+
+def create_video_raw(prompt: str, image_data_uri: str, model: str, aspect_ratio: str, duration: int):
+    api_key = get_api_key()
+    url = "https://api.x.ai/v1/videos/generations"
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    payload = {
+        "model": model,
+        "prompt": prompt,
+        "image": image_data_uri,
+        "aspect_ratio": aspect_ratio,
+        "duration": duration,
+    }
+    r = requests.post(url, headers=headers, json=payload, timeout=300)
+    r.raise_for_status()
+    return r.json()
+
+
+CUSTOM_GROK_SYSTEM = """You are Custom Grok.
+Reply as a direct one-way assistant.
+Rules:
+- No planner / builder / critic structure.
+- No self-referential fluff.
+- Be sharp, useful, and concise.
+- Match casual tone naturally.
+- If the user asks for creation, return the finished result.
 """
 
 inject_theme()
@@ -286,8 +318,8 @@ if not client:
 st.markdown(
     """
     <div class="hero">
-        <h1>Grok Hacker SaaS</h1>
-        <p>Neon hacker UI • Select-menu controls • Chat + Imagine image generation • Secrets-only API</p>
+        <h1>Custom Grok Hacker</h1>
+        <p>One-way chat • Imagine image generation • Image edit • Video from image • Secrets-only API</p>
     </div>
     """,
     unsafe_allow_html=True,
@@ -297,230 +329,84 @@ with st.sidebar:
     st.subheader("xAI")
     st.success("API loaded from Secrets")
 
-    st.subheader("Models")
-    planner_model = st.selectbox("Planner model", CHAT_MODEL_OPTIONS, index=2)
-    builder_model = st.selectbox("Builder model", CHAT_MODEL_OPTIONS, index=1)
-    critic_model = st.selectbox("Critic model", CHAT_MODEL_OPTIONS, index=1)
-    image_model = st.selectbox("Imagine model", IMAGE_MODEL_OPTIONS, index=0)
+    st.subheader("Chat")
+    chat_model = st.selectbox("Chat model", CHAT_MODEL_OPTIONS, index=1)
 
-    st.subheader("Mode")
-    search_mode = st.selectbox("Web search", ["Off", "Planner only", "Builder only", "Critic only", "All"], index=0)
+    st.subheader("Image")
+    image_model = st.selectbox("Image model", IMAGE_MODEL_OPTIONS, index=0)
+    image_size = st.selectbox("Image size", IMAGE_SIZE_OPTIONS, index=0)
+    image_count = st.selectbox("Image count", [1, 2, 3, 4], index=0)
 
-    planner_web = search_mode in ["Planner only", "All"]
-    builder_web = search_mode in ["Builder only", "All"]
-    critic_web = search_mode in ["Critic only", "All"]
-
-    st.subheader("Image options")
-    image_size = st.selectbox("Image size", ["1024x1024", "1536x1024", "1024x1536"], index=0)
-    image_count = st.selectbox("Number of images", [1, 2, 3, 4], index=0)
+    st.subheader("Video")
+    video_model = st.selectbox("Video model", VIDEO_MODEL_OPTIONS, index=0)
+    video_aspect = st.selectbox("Video aspect ratio", VIDEO_ASPECT_OPTIONS, index=0)
+    video_duration = st.selectbox("Video seconds", VIDEO_DURATION_OPTIONS, index=0)
 
     if st.button("Clear session", use_container_width=True):
-        st.session_state.prev_ids = {"planner": None, "builder": None, "critic": None}
-        st.session_state.outputs = {"planner": "", "builder": "", "critic": ""}
-        st.session_state.history = []
+        st.session_state.chat_output = ""
+        st.session_state.chat_history = []
         st.session_state.generated_images = []
+        st.session_state.edited_images = []
+        st.session_state.generated_videos = []
         st.success("Session cleared.")
         st.rerun()
 
-tab_chat, tab_imagine = st.tabs(["⚡ Chat", "🖼️ Imagine"])
+tab_chat, tab_imagine, tab_edit, tab_video = st.tabs(["⚡ Chat", "🖼️ Imagine", "🛠️ Edit Image", "🎬 Video"])
 
 with tab_chat:
-    task = st.text_area("Task", value="", height=180, placeholder="Ask anything...")
-    context = st.text_area("Project context", value="", height=120, placeholder="Optional context...")
-    follow_up = st.text_input("Follow-up for current thread (optional)")
+    user_prompt = st.text_area("Message", value="", height=220, placeholder="Talk to Custom Grok...")
+    send_chat = st.button("Send", use_container_width=True)
 
-    c1, c2 = st.columns(2)
-    run_fresh = c1.button("Run fresh", use_container_width=True)
-    run_continue = c2.button("Continue current thread", use_container_width=True)
-
-    if run_fresh:
+    if send_chat:
         enforce_rate_limit()
-        casual = is_casual(task, context)
-
-        if casual:
-            planner_text = "Casual conversation detected. Use a short natural reply."
-            builder_text = "Hey! I'm your Grok-powered assistant ⚡ What do you need?"
-            critic_text = "Natural and appropriate for casual chat."
-            st.session_state.prev_ids = {"planner": None, "builder": None, "critic": None}
-            st.session_state.outputs = {
-                "planner": planner_text,
-                "builder": builder_text,
-                "critic": critic_text,
-            }
+        if not user_prompt.strip():
+            st.error("Enter a message first.")
         else:
-            with st.spinner("Running Planner / Builder / Critic..."):
-                planner_prompt = f"""Task:
-{task}
-
-Project context:
-{context}
-
-Return:
-- goal
-- architecture
-- execution steps
-- risks
-"""
-                planner_resp = call_agent(client, planner_model, PLANNER_SYSTEM, planner_prompt, planner_web)
-                planner_text = extract_text(planner_resp)
-
-                builder_prompt = f"""Task:
-{task}
-
-Project context:
-{context}
-
-Planner output:
-{planner_text}
-
-Produce the best practical final result.
-"""
-                builder_resp = call_agent(client, builder_model, BUILDER_SYSTEM, builder_prompt, builder_web)
-                builder_text = extract_text(builder_resp)
-
-                critic_prompt = f"""Task:
-{task}
-
-Project context:
-{context}
-
-Planner output:
-{planner_text}
-
-Builder output:
-{builder_text}
-
-Tighten the result.
-"""
-                critic_resp = call_agent(client, critic_model, CRITIC_SYSTEM, critic_prompt, critic_web)
-                critic_text = extract_text(critic_resp)
-
-                st.session_state.prev_ids = {
-                    "planner": planner_resp.id,
-                    "builder": builder_resp.id,
-                    "critic": critic_resp.id,
-                }
-                st.session_state.outputs = {
-                    "planner": planner_text,
-                    "builder": builder_text,
-                    "critic": critic_text,
-                }
-
-        st.session_state.history.insert(0, {
-            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "task": task,
-            "context": context,
-            "planner": st.session_state.outputs["planner"],
-            "builder": st.session_state.outputs["builder"],
-            "critic": st.session_state.outputs["critic"],
-        })
-
-    if run_continue:
-        enforce_rate_limit()
-        missing = [k for k, v in st.session_state.prev_ids.items() if not v]
-        if missing:
-            st.error("Run fresh first so response IDs exist.")
-        elif not follow_up.strip():
-            st.error("Enter a follow-up message first.")
-        else:
-            with st.spinner("Continuing stored threads..."):
-                planner_resp = call_agent(
-                    client, planner_model, PLANNER_SYSTEM, follow_up, planner_web,
-                    previous_response_id=st.session_state.prev_ids["planner"],
+            with st.spinner("Thinking..."):
+                st.session_state.chat_output = call_chat(
+                    client=client,
+                    model=chat_model,
+                    system_prompt=CUSTOM_GROK_SYSTEM,
+                    user_prompt=user_prompt,
                 )
-                planner_text = extract_text(planner_resp)
-
-                builder_resp = call_agent(
-                    client, builder_model, BUILDER_SYSTEM,
-                    f"Follow-up request:\n{follow_up}\n\nLatest planner update:\n{planner_text}",
-                    builder_web,
-                    previous_response_id=st.session_state.prev_ids["builder"],
-                )
-                builder_text = extract_text(builder_resp)
-
-                critic_resp = call_agent(
-                    client, critic_model, CRITIC_SYSTEM,
-                    f"Follow-up request:\n{follow_up}\n\nLatest planner update:\n{planner_text}\n\nLatest builder update:\n{builder_text}",
-                    critic_web,
-                    previous_response_id=st.session_state.prev_ids["critic"],
-                )
-                critic_text = extract_text(critic_resp)
-
-                st.session_state.prev_ids = {
-                    "planner": planner_resp.id,
-                    "builder": builder_resp.id,
-                    "critic": critic_resp.id,
-                }
-                st.session_state.outputs = {
-                    "planner": planner_text,
-                    "builder": builder_text,
-                    "critic": critic_text,
-                }
-
-            st.session_state.history.insert(0, {
+            st.session_state.chat_history.insert(0, {
                 "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "task": f"[FOLLOW-UP] {follow_up}",
-                "context": "",
-                "planner": planner_text,
-                "builder": builder_text,
-                "critic": critic_text,
+                "user": user_prompt,
+                "assistant": st.session_state.chat_output,
             })
 
-    planner_out = st.session_state.outputs["planner"]
-    builder_out = st.session_state.outputs["builder"]
-    critic_out = st.session_state.outputs["critic"]
+    render_card("Custom Grok", st.session_state.chat_output)
 
-    col1, col2, col3 = st.columns(3)
-
-    with col1:
-        render_hack_card("Planner", planner_out)
-
-    with col2:
-        render_hack_card("Builder", builder_out)
-
-    with col3:
-        render_hack_card("Critic", critic_out)
-
-    if planner_out or builder_out or critic_out:
-        pdf_bytes = build_pdf(
-            title="Grok Hacker SaaS Output",
-            planner=planner_out,
-            builder=builder_out,
-            critic=critic_out,
-        )
+    if st.session_state.chat_output:
+        pdf_bytes = build_pdf("Custom Grok Chat Output", st.session_state.chat_output)
         st.download_button(
-            "Download PDF",
+            "Download Chat PDF",
             data=pdf_bytes,
-            file_name=f"grok_hacker_saas_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
+            file_name=f"custom_grok_chat_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
             mime="application/pdf",
             use_container_width=True,
         )
 
-    st.markdown("### Session history")
-    if not st.session_state.history:
-        st.caption("No runs yet.")
+    st.markdown("### Chat history")
+    if not st.session_state.chat_history:
+        st.caption("No messages yet.")
     else:
-        for i, item in enumerate(st.session_state.history[:10], 1):
-            with st.expander(f"{i}. {item['time']} — {item['task'][:80]}"):
-                st.markdown(f"**Task:** {item['task']}")
-                if item["context"]:
-                    st.markdown(f"**Context:** {item['context']}")
-                st.markdown(f"**Planner:** {item['planner']}")
-                st.markdown(f"**Builder:** {item['builder']}")
-                st.markdown(f"**Critic:** {item['critic']}")
+        for i, item in enumerate(st.session_state.chat_history[:10], 1):
+            with st.expander(f"{i}. {item['time']}"):
+                st.markdown(f"**You:** {item['user']}")
+                st.markdown(f"**Custom Grok:** {item['assistant']}")
 
 with tab_imagine:
-    st.markdown("### Grok Imagine")
     image_prompt = st.text_area("Image prompt", value="", height=180, placeholder="Describe the image you want...")
-    image_run = st.button("Generate image", use_container_width=True)
+    run_image = st.button("Generate image", use_container_width=True)
 
-    if image_run:
+    if run_image:
         enforce_rate_limit()
         if not image_prompt.strip():
             st.error("Enter an image prompt first.")
         else:
             with st.spinner("Generating image..."):
-                resp = generate_image(client, image_model, image_prompt, image_size, image_count)
+                resp = create_image(client, image_model, image_prompt, image_size, image_count)
                 urls = []
                 for item in getattr(resp, "data", []) or []:
                     url = getattr(item, "url", None) if not isinstance(item, dict) else item.get("url")
@@ -534,3 +420,58 @@ with tab_imagine:
             with cols[idx % 2]:
                 st.image(url, use_container_width=True)
                 st.code(url, language="text")
+
+with tab_edit:
+    edit_source = st.file_uploader("Upload image to edit", type=["png", "jpg", "jpeg", "webp"], key="edit_upload")
+    edit_prompt = st.text_area("Edit prompt", value="", height=160, placeholder="Describe exactly what to change...")
+    run_edit = st.button("Edit image", use_container_width=True)
+
+    if run_edit:
+        enforce_rate_limit()
+        if edit_source is None:
+            st.error("Upload an image first.")
+        elif not edit_prompt.strip():
+            st.error("Enter an edit prompt first.")
+        else:
+            with st.spinner("Editing image..."):
+                image_data_uri = file_to_data_uri(edit_source)
+                data = edit_image_raw(edit_prompt, image_data_uri, image_model)
+                urls = [item.get("url") for item in data.get("data", []) if item.get("url")]
+                st.session_state.edited_images = urls
+
+    if st.session_state.edited_images:
+        cols = st.columns(2)
+        for idx, url in enumerate(st.session_state.edited_images):
+            with cols[idx % 2]:
+                st.image(url, use_container_width=True)
+                st.code(url, language="text")
+
+with tab_video:
+    video_source = st.file_uploader("Upload source image for video", type=["png", "jpg", "jpeg", "webp"], key="video_upload")
+    video_prompt = st.text_area("Video prompt", value="", height=160, placeholder="Describe the motion, camera move, and style...")
+    run_video = st.button("Generate video", use_container_width=True)
+
+    if run_video:
+        enforce_rate_limit()
+        if video_source is None:
+            st.error("Upload a source image first.")
+        elif not video_prompt.strip():
+            st.error("Enter a video prompt first.")
+        else:
+            with st.spinner("Generating video..."):
+                image_data_uri = file_to_data_uri(video_source)
+                data = create_video_raw(video_prompt, image_data_uri, video_model, video_aspect, video_duration)
+                urls = []
+                if "data" in data:
+                    for item in data["data"]:
+                        if isinstance(item, dict):
+                            if item.get("url"):
+                                urls.append(item["url"])
+                            elif item.get("video_url"):
+                                urls.append(item["video_url"])
+                st.session_state.generated_videos = urls
+
+    if st.session_state.generated_videos:
+        for url in st.session_state.generated_videos:
+            st.video(url)
+            st.code(url, language="text")
