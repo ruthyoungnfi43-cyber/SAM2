@@ -9,7 +9,6 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.platypus import Paragraph, Preformatted, SimpleDocTemplate, Spacer
 
-
 st.set_page_config(page_title="Grok Multi-Agent UI", layout="wide")
 
 DEFAULT_TASK = """Build a PDF creator tool.
@@ -39,7 +38,7 @@ def get_client() -> OpenAI | None:
     return OpenAI(
         api_key=api_key,
         base_url="https://api.x.ai/v1",
-        timeout=3600,
+        timeout=60,
     )
 
 
@@ -50,8 +49,7 @@ def extract_text(response) -> str:
 
     parts = []
     for item in getattr(response, "output", []) or []:
-        item_type = getattr(item, "type", None)
-        if item_type == "message":
+        if getattr(item, "type", None) == "message":
             for content in getattr(item, "content", []) or []:
                 ctype = getattr(content, "type", None)
                 if ctype in ("output_text", "text"):
@@ -73,6 +71,16 @@ def extract_citations(response):
     except Exception:
         pass
     return getattr(response, "citations", []) or []
+
+
+def is_casual(text: str, context: str = "") -> bool:
+    combined = f"{text} {context}".strip().lower()
+    casual_phrases = [
+        "hi", "hello", "hey", "yo", "sup", "what's up", "whats up",
+        "how are you", "how are u", "how r u", "good morning",
+        "good evening", "thanks", "thank you"
+    ]
+    return any(p in combined for p in casual_phrases) and len(combined) <= 120
 
 
 def call_agent(
@@ -114,17 +122,10 @@ def build_pdf(title: str, planner: str, builder: str, critic: str) -> bytes:
     story.append(Paragraph(datetime.now().strftime("%Y-%m-%d %H:%M:%S"), styles["BodyText"]))
     story.append(Spacer(1, 16))
 
-    sections = [
-        ("Planner", planner),
-        ("Builder", builder),
-        ("Critic", critic),
-    ]
-
-    for name, content in sections:
+    for name, content in [("Planner", planner), ("Builder", builder), ("Critic", critic)]:
         story.append(Paragraph(name, styles["Heading2"]))
         story.append(Spacer(1, 6))
-        safe = content or "(empty)"
-        story.append(Preformatted(safe, styles["Code"]))
+        story.append(Preformatted(content or "(empty)", styles["Code"]))
         story.append(Spacer(1, 14))
 
     doc.build(story)
@@ -133,31 +134,27 @@ def build_pdf(title: str, planner: str, builder: str, critic: str) -> bytes:
 
 
 PLANNER_SYSTEM = """You are Planner.
-Return a sharp execution plan for the user's task.
-Priorities:
-- concrete architecture
-- exact implementation steps
-- note risks and assumptions
-- optimize for a local runnable project
-- when web search is available, use it if current docs/specs matter
+
+First detect intent.
+- If the input is casual conversation, greeting, small talk, or a simple social message:
+  do NOT create a project plan, architecture, risks, or implementation steps.
+  Return a very short note describing the conversational intent only.
+- If the input is a real task/request/project:
+  return a concise structured plan.
+
+Be smart. Do not over-engineer simple inputs.
 """
 
 BUILDER_SYSTEM = """You are Builder.
-Turn the task and planner output into the strongest practical implementation.
-Priorities:
-- complete runnable result
-- direct answer before commentary
-- if code is needed, return full code
-- avoid legacy interfaces when a current recommended interface exists
+- For casual conversation: reply naturally and briefly like a real chat response.
+- For real tasks: produce the strongest practical implementation.
+Avoid over-engineering.
 """
 
 CRITIC_SYSTEM = """You are Critic.
-Review the planner and builder outputs.
-Return:
-1) important gaps
-2) important risks
-3) a tightened final version
-Be concrete and improve the result, not just comment on it.
+- For casual conversation: briefly confirm whether the response is natural and appropriate.
+- For real tasks: review gaps, risks, and tighten the final version.
+Avoid inventing unnecessary structure.
 """
 
 st.title("Grok Multi-Agent UI")
@@ -180,7 +177,7 @@ with st.sidebar:
     critic_model = st.text_input("Critic model", value="grok-4.20-reasoning")
 
     st.subheader("Tools")
-    planner_web = st.checkbox("Planner web_search", value=True)
+    planner_web = st.checkbox("Planner web_search", value=False)
     builder_web = st.checkbox("Builder web_search", value=False)
     critic_web = st.checkbox("Critic web_search", value=False)
 
@@ -208,8 +205,22 @@ run_fresh = c1.button("Run fresh", use_container_width=True)
 run_continue = c2.button("Continue current thread", use_container_width=True)
 
 if run_fresh:
-    with st.spinner("Running Planner / Builder / Critic..."):
-        planner_prompt = f"""Task:
+    casual = is_casual(task, context)
+
+    if casual:
+        planner_text = "Casual conversation detected. Use a short natural reply."
+        builder_text = "Hey! I'm doing great 😊 How about you?"
+        critic_text = "Looks natural and appropriate for a casual greeting."
+        st.session_state.prev_ids = {"planner": None, "builder": None, "critic": None}
+        st.session_state.outputs = {
+            "planner": planner_text,
+            "builder": builder_text,
+            "critic": critic_text,
+        }
+        st.session_state.citations = {"planner": [], "builder": [], "critic": []}
+    else:
+        with st.spinner("Running Planner / Builder / Critic..."):
+            planner_prompt = f"""Task:
 {task}
 
 Project context:
@@ -222,16 +233,16 @@ Return:
 - risks
 - next implementation target
 """
-        planner_resp = call_agent(
-            client=client,
-            model=planner_model,
-            system_prompt=PLANNER_SYSTEM,
-            user_prompt=planner_prompt,
-            use_web_search=planner_web,
-        )
-        planner_text = extract_text(planner_resp)
+            planner_resp = call_agent(
+                client=client,
+                model=planner_model,
+                system_prompt=PLANNER_SYSTEM,
+                user_prompt=planner_prompt,
+                use_web_search=planner_web,
+            )
+            planner_text = extract_text(planner_resp)
 
-        builder_prompt = f"""Task:
+            builder_prompt = f"""Task:
 {task}
 
 Project context:
@@ -243,16 +254,16 @@ Planner output:
 Produce the best practical final implementation for this task.
 If code is needed, return complete runnable code.
 """
-        builder_resp = call_agent(
-            client=client,
-            model=builder_model,
-            system_prompt=BUILDER_SYSTEM,
-            user_prompt=builder_prompt,
-            use_web_search=builder_web,
-        )
-        builder_text = extract_text(builder_resp)
+            builder_resp = call_agent(
+                client=client,
+                model=builder_model,
+                system_prompt=BUILDER_SYSTEM,
+                user_prompt=builder_prompt,
+                use_web_search=builder_web,
+            )
+            builder_text = extract_text(builder_resp)
 
-        critic_prompt = f"""Task:
+            critic_prompt = f"""Task:
 {task}
 
 Project context:
@@ -266,30 +277,30 @@ Builder output:
 
 Improve the work and return the corrected final version.
 """
-        critic_resp = call_agent(
-            client=client,
-            model=critic_model,
-            system_prompt=CRITIC_SYSTEM,
-            user_prompt=critic_prompt,
-            use_web_search=critic_web,
-        )
-        critic_text = extract_text(critic_resp)
+            critic_resp = call_agent(
+                client=client,
+                model=critic_model,
+                system_prompt=CRITIC_SYSTEM,
+                user_prompt=critic_prompt,
+                use_web_search=critic_web,
+            )
+            critic_text = extract_text(critic_resp)
 
-        st.session_state.prev_ids = {
-            "planner": planner_resp.id,
-            "builder": builder_resp.id,
-            "critic": critic_resp.id,
-        }
-        st.session_state.outputs = {
-            "planner": planner_text,
-            "builder": builder_text,
-            "critic": critic_text,
-        }
-        st.session_state.citations = {
-            "planner": extract_citations(planner_resp),
-            "builder": extract_citations(builder_resp),
-            "critic": extract_citations(critic_resp),
-        }
+            st.session_state.prev_ids = {
+                "planner": planner_resp.id,
+                "builder": builder_resp.id,
+                "critic": critic_resp.id,
+            }
+            st.session_state.outputs = {
+                "planner": planner_text,
+                "builder": builder_text,
+                "critic": critic_text,
+            }
+            st.session_state.citations = {
+                "planner": extract_citations(planner_resp),
+                "builder": extract_citations(builder_resp),
+                "critic": extract_citations(critic_resp),
+            }
 
 if run_continue:
     missing = [k for k, v in st.session_state.prev_ids.items() if not v]
@@ -373,23 +384,14 @@ col1, col2, col3 = st.columns(3)
 with col1:
     st.subheader("Planner")
     st.markdown(planner_out or "_No output yet._")
-    if st.session_state.citations["planner"]:
-        with st.expander("Planner citations"):
-            st.code(json.dumps(st.session_state.citations["planner"], indent=2, default=str), language="json")
 
 with col2:
     st.subheader("Builder")
     st.markdown(builder_out or "_No output yet._")
-    if st.session_state.citations["builder"]:
-        with st.expander("Builder citations"):
-            st.code(json.dumps(st.session_state.citations["builder"], indent=2, default=str), language="json")
 
 with col3:
     st.subheader("Critic")
     st.markdown(critic_out or "_No output yet._")
-    if st.session_state.citations["critic"]:
-        with st.expander("Critic citations"):
-            st.code(json.dumps(st.session_state.citations["critic"], indent=2, default=str), language="json")
 
 if planner_out or builder_out or critic_out:
     pdf_bytes = build_pdf(
