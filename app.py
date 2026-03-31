@@ -247,6 +247,17 @@ def build_pdf(title: str, planner: str, builder: str, critic: str) -> bytes:
     return buf.read()
 
 
+def render_hack_card(title: str, content: str):
+    safe_content = content if content else '<span class="muted">No output yet.</span>'
+    html = f"""
+    <div class="hack-card">
+        <div class="hack-title">{title}</div>
+        <div>{safe_content}</div>
+    </div>
+    """
+    st.markdown(html, unsafe_allow_html=True)
+
+
 PLANNER_SYSTEM = """You are Planner.
 Detect intent first.
 - Casual/social input: do not create a project plan. Return one short intent note only.
@@ -462,13 +473,13 @@ Tighten the result.
     col1, col2, col3 = st.columns(3)
 
     with col1:
-        st.markdown(f'<div class="hack-card"><div class="hack-title">Planner</div>{planner_out or "<span class=\\"muted\\">No output yet.</span>"}</div>', unsafe_allow_html=True)
+        render_hack_card("Planner", planner_out)
 
     with col2:
-        st.markdown(f'<div class="hack-card"><div class="hack-title">Builder</div>{builder_out or "<span class=\\"muted\\">No output yet.</span>"}</div>', unsafe_allow_html=True)
+        render_hack_card("Builder", builder_out)
 
     with col3:
-        st.markdown(f'<div class="hack-card"><div class="hack-title">Critic</div>{critic_out or "<span class=\\"muted\\">No output yet.</span>"}</div>', unsafe_allow_html=True)
+        render_hack_card("Critic", critic_out)
 
     if planner_out or builder_out or critic_out:
         pdf_bytes = build_pdf(
