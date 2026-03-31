@@ -9,10 +9,17 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.platypus import Paragraph, Preformatted, SimpleDocTemplate, Spacer
 
-st.set_page_config(page_title="Grok Multi-Agent SaaS", layout="wide")
+st.set_page_config(page_title="Grok Hacker SaaS", page_icon="⚡", layout="wide")
 
-APP_TITLE = "Grok Multi-Agent SaaS"
-APP_CAPTION = "Secrets-only xAI key • session memory • rate limiting • PDF export"
+CHAT_MODEL_OPTIONS = [
+    "grok-4",
+    "grok-4.20-reasoning",
+    "grok-4.20-multi-agent",
+]
+
+IMAGE_MODEL_OPTIONS = [
+    "grok-imagine-image",
+]
 
 CASUAL_PHRASES = [
     "hi", "hello", "hey", "yo", "sup", "what's up", "whats up",
@@ -32,8 +39,107 @@ if "history" not in st.session_state:
 if "run_times" not in st.session_state:
     st.session_state.run_times = []
 
-if "logged_in" not in st.session_state:
-    st.session_state.logged_in = False
+if "generated_images" not in st.session_state:
+    st.session_state.generated_images = []
+
+
+def inject_theme():
+    st.markdown(
+        """
+        <style>
+        :root {
+            --bg: #05080a;
+            --panel: #0a0f12;
+            --panel2: #0d1418;
+            --text: #d8ffe7;
+            --muted: #8ab79b;
+            --green: #00ff88;
+            --green2: #00cc6f;
+            --border: rgba(0,255,136,.18);
+            --glow: 0 0 18px rgba(0,255,136,.18);
+        }
+        .stApp {
+            background:
+              radial-gradient(circle at top right, rgba(0,255,136,.08), transparent 22%),
+              radial-gradient(circle at bottom left, rgba(0,255,136,.06), transparent 18%),
+              linear-gradient(180deg, #030507 0%, #071014 100%);
+            color: var(--text);
+        }
+        [data-testid="stSidebar"] {
+            background: linear-gradient(180deg, #0b1014 0%, #101720 100%);
+            border-right: 1px solid var(--border);
+        }
+        h1, h2, h3, .stMarkdown, label, p, div {
+            color: var(--text);
+        }
+        .block-container {
+            padding-top: 1.5rem;
+        }
+        .stTextInput > div > div > input,
+        .stTextArea textarea,
+        .stSelectbox > div > div,
+        .stNumberInput input {
+            background: rgba(8,12,14,.9) !important;
+            color: var(--text) !important;
+            border: 1px solid var(--border) !important;
+            box-shadow: var(--glow);
+            border-radius: 12px !important;
+        }
+        .stButton > button,
+        .stDownloadButton > button {
+            background: linear-gradient(180deg, #0d1b14 0%, #0a140f 100%) !important;
+            color: var(--green) !important;
+            border: 1px solid rgba(0,255,136,.35) !important;
+            border-radius: 14px !important;
+            box-shadow: 0 0 20px rgba(0,255,136,.12);
+            font-weight: 700 !important;
+        }
+        .stButton > button:hover,
+        .stDownloadButton > button:hover {
+            border-color: var(--green) !important;
+            box-shadow: 0 0 28px rgba(0,255,136,.22);
+        }
+        .hack-card {
+            background: linear-gradient(180deg, rgba(8,12,14,.96), rgba(9,15,18,.96));
+            border: 1px solid var(--border);
+            border-radius: 18px;
+            padding: 16px 18px;
+            box-shadow: var(--glow);
+            min-height: 220px;
+        }
+        .hack-title {
+            color: var(--green);
+            font-weight: 800;
+            letter-spacing: .04em;
+            margin-bottom: 10px;
+            text-transform: uppercase;
+        }
+        .muted {
+            color: var(--muted);
+        }
+        .hero {
+            padding: 18px 22px;
+            border: 1px solid var(--border);
+            border-radius: 20px;
+            background:
+              linear-gradient(135deg, rgba(0,255,136,.08), rgba(0,0,0,0) 35%),
+              linear-gradient(180deg, rgba(9,15,18,.94), rgba(8,12,14,.98));
+            box-shadow: 0 0 24px rgba(0,255,136,.12);
+            margin-bottom: 16px;
+        }
+        .hero h1 {
+            color: #eafff3;
+            font-size: 3rem;
+            margin-bottom: .2rem;
+        }
+        .hero p {
+            color: var(--muted);
+            font-size: 1rem;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def get_secret(name: str, default=None):
@@ -43,27 +149,6 @@ def get_secret(name: str, default=None):
     except Exception:
         pass
     return os.getenv(name, default)
-
-
-def require_login():
-    app_password = get_secret("APP_PASSWORD", "")
-    if not app_password:
-        st.session_state.logged_in = True
-        return
-
-    if st.session_state.logged_in:
-        return
-
-    st.title(APP_TITLE)
-    st.caption("Private access")
-    entered = st.text_input("Enter access password", type="password")
-    if st.button("Unlock", use_container_width=True):
-        if entered == app_password:
-            st.session_state.logged_in = True
-            st.rerun()
-        else:
-            st.error("Wrong password.")
-    st.stop()
 
 
 def get_client() -> OpenAI | None:
@@ -79,7 +164,7 @@ def get_client() -> OpenAI | None:
 
 def is_casual(text: str, context: str = "") -> bool:
     combined = f"{text} {context}".strip().lower()
-    return any(p in combined for p in CASUAL_PHRASES) and len(combined) <= 140
+    return any(p in combined for p in CASUAL_PHRASES) and len(combined) <= 160
 
 
 def enforce_rate_limit():
@@ -88,7 +173,7 @@ def enforce_rate_limit():
     max_runs = 8
     st.session_state.run_times = [t for t in st.session_state.run_times if now - t < window_seconds]
     if len(st.session_state.run_times) >= max_runs:
-        st.error("Rate limit hit. Please wait a minute and try again.")
+        st.error("Rate limit hit. Wait a minute and try again.")
         st.stop()
     st.session_state.run_times.append(now)
 
@@ -114,10 +199,7 @@ def extract_text(response) -> str:
 
 
 def call_agent(client, model, system_prompt, user_prompt, use_web_search=False, previous_response_id=None):
-    payload = {
-        "model": model,
-        "store": True,
-    }
+    payload = {"model": model, "store": True}
 
     if use_web_search:
         payload["tools"] = [{"type": "web_search"}]
@@ -132,6 +214,15 @@ def call_agent(client, model, system_prompt, user_prompt, use_web_search=False, 
         ]
 
     return client.responses.create(**payload)
+
+
+def generate_image(client, model: str, prompt: str, size: str, n: int = 1):
+    return client.images.generate(
+        model=model,
+        prompt=prompt,
+        size=size,
+        n=n,
+    )
 
 
 def build_pdf(title: str, planner: str, builder: str, critic: str) -> bytes:
@@ -174,66 +265,80 @@ CRITIC_SYSTEM = """You are Critic.
 - Real task/request: identify gaps/risks and tighten the final version.
 """
 
-require_login()
+inject_theme()
 client = get_client()
 
 if not client:
-    st.error("Missing XAI_API_KEY in Streamlit Secrets / environment.")
+    st.error("Missing XAI_API_KEY in Streamlit Secrets or environment.")
     st.stop()
 
-st.title(APP_TITLE)
-st.caption(APP_CAPTION)
+st.markdown(
+    """
+    <div class="hero">
+        <h1>Grok Hacker SaaS</h1>
+        <p>Neon hacker UI • Select-menu controls • Chat + Imagine image generation • Secrets-only API</p>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
 with st.sidebar:
-    st.subheader("Status")
-    st.success("xAI key loaded from Secrets")
-    if get_secret("APP_PASSWORD", ""):
-        st.info("Password gate enabled")
-    else:
-        st.warning("Password gate disabled")
+    st.subheader("xAI")
+    st.success("API loaded from Secrets")
 
     st.subheader("Models")
-    planner_model = st.text_input("Planner model", value="grok-4.20-multi-agent")
-    builder_model = st.text_input("Builder model", value="grok-4.20-reasoning")
-    critic_model = st.text_input("Critic model", value="grok-4.20-reasoning")
+    planner_model = st.selectbox("Planner model", CHAT_MODEL_OPTIONS, index=2)
+    builder_model = st.selectbox("Builder model", CHAT_MODEL_OPTIONS, index=1)
+    critic_model = st.selectbox("Critic model", CHAT_MODEL_OPTIONS, index=1)
+    image_model = st.selectbox("Imagine model", IMAGE_MODEL_OPTIONS, index=0)
 
-    st.subheader("Tools")
-    planner_web = st.checkbox("Planner web_search", value=False)
-    builder_web = st.checkbox("Builder web_search", value=False)
-    critic_web = st.checkbox("Critic web_search", value=False)
+    st.subheader("Mode")
+    search_mode = st.selectbox("Web search", ["Off", "Planner only", "Builder only", "Critic only", "All"], index=0)
+
+    planner_web = search_mode in ["Planner only", "All"]
+    builder_web = search_mode in ["Builder only", "All"]
+    critic_web = search_mode in ["Critic only", "All"]
+
+    st.subheader("Image options")
+    image_size = st.selectbox("Image size", ["1024x1024", "1536x1024", "1024x1536"], index=0)
+    image_count = st.selectbox("Number of images", [1, 2, 3, 4], index=0)
 
     if st.button("Clear session", use_container_width=True):
         st.session_state.prev_ids = {"planner": None, "builder": None, "critic": None}
         st.session_state.outputs = {"planner": "", "builder": "", "critic": ""}
         st.session_state.history = []
+        st.session_state.generated_images = []
         st.success("Session cleared.")
         st.rerun()
 
-task = st.text_area("Task", value="", height=180, placeholder="Ask a task, question, or casual prompt...")
-context = st.text_area("Project context", value="", height=120, placeholder="Optional extra context...")
-follow_up = st.text_input("Follow-up for current thread (optional)")
+tab_chat, tab_imagine = st.tabs(["⚡ Chat", "🖼️ Imagine"])
 
-c1, c2 = st.columns(2)
-run_fresh = c1.button("Run fresh", use_container_width=True)
-run_continue = c2.button("Continue current thread", use_container_width=True)
+with tab_chat:
+    task = st.text_area("Task", value="", height=180, placeholder="Ask anything...")
+    context = st.text_area("Project context", value="", height=120, placeholder="Optional context...")
+    follow_up = st.text_input("Follow-up for current thread (optional)")
 
-if run_fresh:
-    enforce_rate_limit()
-    casual = is_casual(task, context)
+    c1, c2 = st.columns(2)
+    run_fresh = c1.button("Run fresh", use_container_width=True)
+    run_continue = c2.button("Continue current thread", use_container_width=True)
 
-    if casual:
-        planner_text = "Casual conversation detected. Use a short natural reply."
-        builder_text = "Hey! I'm doing great 😊 How about you?"
-        critic_text = "Looks natural and appropriate for a casual greeting."
-        st.session_state.prev_ids = {"planner": None, "builder": None, "critic": None}
-        st.session_state.outputs = {
-            "planner": planner_text,
-            "builder": builder_text,
-            "critic": critic_text,
-        }
-    else:
-        with st.spinner("Running Planner / Builder / Critic..."):
-            planner_prompt = f"""Task:
+    if run_fresh:
+        enforce_rate_limit()
+        casual = is_casual(task, context)
+
+        if casual:
+            planner_text = "Casual conversation detected. Use a short natural reply."
+            builder_text = "Hey! I'm your Grok-powered assistant ⚡ What do you need?"
+            critic_text = "Natural and appropriate for casual chat."
+            st.session_state.prev_ids = {"planner": None, "builder": None, "critic": None}
+            st.session_state.outputs = {
+                "planner": planner_text,
+                "builder": builder_text,
+                "critic": critic_text,
+            }
+        else:
+            with st.spinner("Running Planner / Builder / Critic..."):
+                planner_prompt = f"""Task:
 {task}
 
 Project context:
@@ -245,16 +350,10 @@ Return:
 - execution steps
 - risks
 """
-            planner_resp = call_agent(
-                client=client,
-                model=planner_model,
-                system_prompt=PLANNER_SYSTEM,
-                user_prompt=planner_prompt,
-                use_web_search=planner_web,
-            )
-            planner_text = extract_text(planner_resp)
+                planner_resp = call_agent(client, planner_model, PLANNER_SYSTEM, planner_prompt, planner_web)
+                planner_text = extract_text(planner_resp)
 
-            builder_prompt = f"""Task:
+                builder_prompt = f"""Task:
 {task}
 
 Project context:
@@ -265,16 +364,10 @@ Planner output:
 
 Produce the best practical final result.
 """
-            builder_resp = call_agent(
-                client=client,
-                model=builder_model,
-                system_prompt=BUILDER_SYSTEM,
-                user_prompt=builder_prompt,
-                use_web_search=builder_web,
-            )
-            builder_text = extract_text(builder_resp)
+                builder_resp = call_agent(client, builder_model, BUILDER_SYSTEM, builder_prompt, builder_web)
+                builder_text = extract_text(builder_resp)
 
-            critic_prompt = f"""Task:
+                critic_prompt = f"""Task:
 {task}
 
 Project context:
@@ -288,137 +381,145 @@ Builder output:
 
 Tighten the result.
 """
-            critic_resp = call_agent(
-                client=client,
-                model=critic_model,
-                system_prompt=CRITIC_SYSTEM,
-                user_prompt=critic_prompt,
-                use_web_search=critic_web,
-            )
-            critic_text = extract_text(critic_resp)
+                critic_resp = call_agent(client, critic_model, CRITIC_SYSTEM, critic_prompt, critic_web)
+                critic_text = extract_text(critic_resp)
 
-            st.session_state.prev_ids = {
-                "planner": planner_resp.id,
-                "builder": builder_resp.id,
-                "critic": critic_resp.id,
-            }
-            st.session_state.outputs = {
-                "planner": planner_text,
-                "builder": builder_text,
-                "critic": critic_text,
-            }
-
-    st.session_state.history.insert(0, {
-        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "task": task,
-        "context": context,
-        "planner": st.session_state.outputs["planner"],
-        "builder": st.session_state.outputs["builder"],
-        "critic": st.session_state.outputs["critic"],
-    })
-
-if run_continue:
-    enforce_rate_limit()
-    missing = [k for k, v in st.session_state.prev_ids.items() if not v]
-    if missing:
-        st.error("Run fresh first so response IDs exist.")
-    elif not follow_up.strip():
-        st.error("Enter a follow-up message first.")
-    else:
-        with st.spinner("Continuing stored threads..."):
-            planner_resp = call_agent(
-                client=client,
-                model=planner_model,
-                system_prompt=PLANNER_SYSTEM,
-                user_prompt=follow_up,
-                use_web_search=planner_web,
-                previous_response_id=st.session_state.prev_ids["planner"],
-            )
-            planner_text = extract_text(planner_resp)
-
-            builder_resp = call_agent(
-                client=client,
-                model=builder_model,
-                system_prompt=BUILDER_SYSTEM,
-                user_prompt=f"Follow-up request:\n{follow_up}\n\nLatest planner update:\n{planner_text}",
-                use_web_search=builder_web,
-                previous_response_id=st.session_state.prev_ids["builder"],
-            )
-            builder_text = extract_text(builder_resp)
-
-            critic_resp = call_agent(
-                client=client,
-                model=critic_model,
-                system_prompt=CRITIC_SYSTEM,
-                user_prompt=f"Follow-up request:\n{follow_up}\n\nLatest planner update:\n{planner_text}\n\nLatest builder update:\n{builder_text}",
-                use_web_search=critic_web,
-                previous_response_id=st.session_state.prev_ids["critic"],
-            )
-            critic_text = extract_text(critic_resp)
-
-            st.session_state.prev_ids = {
-                "planner": planner_resp.id,
-                "builder": builder_resp.id,
-                "critic": critic_resp.id,
-            }
-            st.session_state.outputs = {
-                "planner": planner_text,
-                "builder": builder_text,
-                "critic": critic_text,
-            }
+                st.session_state.prev_ids = {
+                    "planner": planner_resp.id,
+                    "builder": builder_resp.id,
+                    "critic": critic_resp.id,
+                }
+                st.session_state.outputs = {
+                    "planner": planner_text,
+                    "builder": builder_text,
+                    "critic": critic_text,
+                }
 
         st.session_state.history.insert(0, {
             "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "task": f"[FOLLOW-UP] {follow_up}",
-            "context": "",
-            "planner": planner_text,
-            "builder": builder_text,
-            "critic": critic_text,
+            "task": task,
+            "context": context,
+            "planner": st.session_state.outputs["planner"],
+            "builder": st.session_state.outputs["builder"],
+            "critic": st.session_state.outputs["critic"],
         })
 
-planner_out = st.session_state.outputs["planner"]
-builder_out = st.session_state.outputs["builder"]
-critic_out = st.session_state.outputs["critic"]
+    if run_continue:
+        enforce_rate_limit()
+        missing = [k for k, v in st.session_state.prev_ids.items() if not v]
+        if missing:
+            st.error("Run fresh first so response IDs exist.")
+        elif not follow_up.strip():
+            st.error("Enter a follow-up message first.")
+        else:
+            with st.spinner("Continuing stored threads..."):
+                planner_resp = call_agent(
+                    client, planner_model, PLANNER_SYSTEM, follow_up, planner_web,
+                    previous_response_id=st.session_state.prev_ids["planner"],
+                )
+                planner_text = extract_text(planner_resp)
 
-col1, col2, col3 = st.columns(3)
+                builder_resp = call_agent(
+                    client, builder_model, BUILDER_SYSTEM,
+                    f"Follow-up request:\n{follow_up}\n\nLatest planner update:\n{planner_text}",
+                    builder_web,
+                    previous_response_id=st.session_state.prev_ids["builder"],
+                )
+                builder_text = extract_text(builder_resp)
 
-with col1:
-    st.subheader("Planner")
-    st.markdown(planner_out or "_No output yet._")
+                critic_resp = call_agent(
+                    client, critic_model, CRITIC_SYSTEM,
+                    f"Follow-up request:\n{follow_up}\n\nLatest planner update:\n{planner_text}\n\nLatest builder update:\n{builder_text}",
+                    critic_web,
+                    previous_response_id=st.session_state.prev_ids["critic"],
+                )
+                critic_text = extract_text(critic_resp)
 
-with col2:
-    st.subheader("Builder")
-    st.markdown(builder_out or "_No output yet._")
+                st.session_state.prev_ids = {
+                    "planner": planner_resp.id,
+                    "builder": builder_resp.id,
+                    "critic": critic_resp.id,
+                }
+                st.session_state.outputs = {
+                    "planner": planner_text,
+                    "builder": builder_text,
+                    "critic": critic_text,
+                }
 
-with col3:
-    st.subheader("Critic")
-    st.markdown(critic_out or "_No output yet._")
+            st.session_state.history.insert(0, {
+                "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "task": f"[FOLLOW-UP] {follow_up}",
+                "context": "",
+                "planner": planner_text,
+                "builder": builder_text,
+                "critic": critic_text,
+            })
 
-if planner_out or builder_out or critic_out:
-    pdf_bytes = build_pdf(
-        title="Grok Multi-Agent Output",
-        planner=planner_out,
-        builder=builder_out,
-        critic=critic_out,
-    )
-    st.download_button(
-        "Download PDF",
-        data=pdf_bytes,
-        file_name=f"grok_multi_agent_output_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
-        mime="application/pdf",
-        use_container_width=True,
-    )
+    planner_out = st.session_state.outputs["planner"]
+    builder_out = st.session_state.outputs["builder"]
+    critic_out = st.session_state.outputs["critic"]
 
-st.divider()
-st.subheader("Session history")
-if not st.session_state.history:
-    st.caption("No runs yet.")
-else:
-    for i, item in enumerate(st.session_state.history[:10], 1):
-        with st.expander(f"{i}. {item['time']} — {item['task'][:80]}"):
-            st.markdown(f"**Task:** {item['task']}")
-            if item["context"]:
-                st.markdown(f"**Context:** {item['context']}")
-            st.markdown(f"**Planner:** {item['planner']}")
-            st.markdown(f"**Builder:** {item['builder']}")
-            st.markdown(f"**Critic:** {item['critic']}")
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        st.markdown(f'<div class="hack-card"><div class="hack-title">Planner</div>{planner_out or "<span class=\\"muted\\">No output yet.</span>"}</div>', unsafe_allow_html=True)
+
+    with col2:
+        st.markdown(f'<div class="hack-card"><div class="hack-title">Builder</div>{builder_out or "<span class=\\"muted\\">No output yet.</span>"}</div>', unsafe_allow_html=True)
+
+    with col3:
+        st.markdown(f'<div class="hack-card"><div class="hack-title">Critic</div>{critic_out or "<span class=\\"muted\\">No output yet.</span>"}</div>', unsafe_allow_html=True)
+
+    if planner_out or builder_out or critic_out:
+        pdf_bytes = build_pdf(
+            title="Grok Hacker SaaS Output",
+            planner=planner_out,
+            builder=builder_out,
+            critic=critic_out,
+        )
+        st.download_button(
+            "Download PDF",
+            data=pdf_bytes,
+            file_name=f"grok_hacker_saas_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
+            mime="application/pdf",
+            use_container_width=True,
+        )
+
+    st.markdown("### Session history")
+    if not st.session_state.history:
+        st.caption("No runs yet.")
+    else:
+        for i, item in enumerate(st.session_state.history[:10], 1):
+            with st.expander(f"{i}. {item['time']} — {item['task'][:80]}"):
+                st.markdown(f"**Task:** {item['task']}")
+                if item["context"]:
+                    st.markdown(f"**Context:** {item['context']}")
+                st.markdown(f"**Planner:** {item['planner']}")
+                st.markdown(f"**Builder:** {item['builder']}")
+                st.markdown(f"**Critic:** {item['critic']}")
+
+with tab_imagine:
+    st.markdown("### Grok Imagine")
+    image_prompt = st.text_area("Image prompt", value="", height=180, placeholder="Describe the image you want...")
+    image_run = st.button("Generate image", use_container_width=True)
+
+    if image_run:
+        enforce_rate_limit()
+        if not image_prompt.strip():
+            st.error("Enter an image prompt first.")
+        else:
+            with st.spinner("Generating image..."):
+                resp = generate_image(client, image_model, image_prompt, image_size, image_count)
+                urls = []
+                for item in getattr(resp, "data", []) or []:
+                    url = getattr(item, "url", None) if not isinstance(item, dict) else item.get("url")
+                    if url:
+                        urls.append(url)
+                st.session_state.generated_images = urls
+
+    if st.session_state.generated_images:
+        cols = st.columns(2)
+        for idx, url in enumerate(st.session_state.generated_images):
+            with cols[idx % 2]:
+                st.image(url, use_container_width=True)
+                st.code(url, language="text")
